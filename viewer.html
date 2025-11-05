@@ -1,0 +1,202 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>LLM fMRI Viewer</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 12px; }
+    .row { display: flex; gap: 12px; align-items: center; }
+    #canvas { border: 1px solid #888; image-rendering: pixelated; }
+    #layers { width: 360px; height: 120px; }
+    textarea { width: 100%; height: 80px; }
+    .tokenstream { font-family: ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap; }
+    .btn { padding: 6px 10px; cursor: pointer; }
+    .badge { padding: 2px 6px; background: #eee; border-radius: 8px; margin-left: 8px; }
+  </style>
+</head>
+<body>
+  <h2>LLM Activation Viewer</h2>
+
+  <div class="row">
+    <label>Server ws://</label>
+    <input id="wsurl" value="ws://localhost:8008/ws/stream" size="40"/>
+    <label>Conversation</label>
+    <input id="conv" value="demo1" size="10"/>
+    <button id="reset" class="btn">Reset</button>
+  </div>
+
+  <div style="margin-top:8px">
+    <textarea id="prompt" placeholder="Type your prompt..."></textarea>
+    <div class="row">
+      <label>Max new tokens</label><input id="maxn" type="number" value="64" style="width:70px"/>
+      <label>Temp</label><input id="temp" type="number" step="0.05" value="0.7" style="width:70px"/>
+      <label>Top-p</label><input id="topp" type="number" step="0.05" value="0.95" style="width:70px"/>
+      <button id="go" class="btn">Generate and Stream</button>
+    </div>
+  </div>
+
+  <div style="margin-top:12px" class="row">
+    <label>Signal→Luminance</label>
+    <select id="signal">
+      <option value="residual">Residual (MVP)</option>
+    </select>
+    <label>Color mode</label>
+    <select id="colormode">
+      <option value="gray">Gray</option>
+      <option value="energy">Blue→Red by magnitude</option>
+    </select>
+    <label>Layout</label>
+    <select id="layout">
+      <option value="grid">Grid layers</option>
+    </select>
+    <span class="badge" id="info"></span>
+  </div>
+
+  <div class="row" style="margin-top:8px">
+    <input type="range" id="slider" min="0" max="0" value="0" style="width: 480px;"/>
+    <span id="toklbl"></span>
+  </div>
+
+  <div class="row" style="margin-top:8px">
+    <canvas id="canvas" width="1024" height="1024"></canvas>
+    <div style="flex:1">
+      <div>Tokens</div>
+      <div id="tokens" class="tokenstream"></div>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const wsurl = document.getElementById("wsurl");
+    const conv = document.getElementById("conv");
+    const promptEl = document.getElementById("prompt");
+    const signalEl = document.getElementById("signal");
+    const colormode = document.getElementById("colormode");
+    const slider = document.getElementById("slider");
+    const tokensDiv = document.getElementById("tokens");
+    const toklbl = document.getElementById("toklbl");
+    const info = document.getElementById("info");
+    const maxn = document.getElementById("maxn");
+    const temp = document.getElementById("temp");
+    const topp = document.getElementById("topp");
+
+    let frames = [];  // {tiles: [L][H][W]}
+    let tokens = [];
+
+    function layoutGrid(tiles) {
+      const L = tiles.length;
+      const th = tiles[0].length, tw = tiles[0][0].length;
+      // Make a near-square grid
+      const cols = Math.ceil(Math.sqrt(L));
+      const rows = Math.ceil(L / cols);
+      const cell = Math.floor(Math.min(canvas.width / cols, canvas.height / rows));
+      const scaleX = cell / tw, scaleY = cell / th;
+
+      // clear
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      for (let i = 0; i < L; i++) {
+        const r = Math.floor(i / cols), c = i % cols;
+        const x0 = Math.floor(c * cell), y0 = Math.floor(r * cell);
+        drawTile(tiles[i], x0, y0, scaleX, scaleY);
+      }
+    }
+
+    function drawTile(tile, x0, y0, sx, sy) {
+      const h = tile.length, w = tile[0].length;
+      const img = ctx.createImageData(w, h);
+      const mode = colormode.value;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const v = tile[y][x]; // 0..255
+          let r, g, b;
+          if (mode === "gray") {
+            r = g = b = v;
+          } else {
+            // energy: blue (low) -> red (high)
+            const t = v / 255.0;
+            r = Math.floor(255 * t);
+            g = Math.floor(255 * (1.0 - Math.abs(t - 0.5) * 2.0));
+            b = Math.floor(255 * (1.0 - t));
+          }
+          const idx = (y * w + x) * 4;
+          img.data[idx + 0] = r;
+          img.data[idx + 1] = g;
+          img.data[idx + 2] = b;
+          img.data[idx + 3] = 255;
+        }
+      }
+      // Put and scale
+      const tmp = document.createElement("canvas");
+      tmp.width = w; tmp.height = h;
+      tmp.getContext("2d").putImageData(img, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(tmp, x0, y0, w * sx, h * sy);
+    }
+
+    function refresh(idx) {
+      if (frames.length === 0) {
+        ctx.fillStyle = "#111"; ctx.fillRect(0, 0, canvas.width, canvas.height); return;
+      }
+      const i = Math.max(0, Math.min(idx, frames.length - 1));
+      const fr = frames[i];
+      layoutGrid(fr.tiles);
+      slider.max = String(frames.length - 1);
+      slider.value = String(i);
+      toklbl.textContent = `frame ${i+1}/${frames.length}`;
+      // tokens view with highlight
+      tokensDiv.innerHTML = tokens.map((t, k) =>
+        k === i ? `<span style="background:#ffd54f">${escapeHtml(t)}</span>` : escapeHtml(t)
+      ).join("");
+      info.textContent = `layers ${frames[0].tiles.length} · tile ${frames[0].tile_h}×${frames[0].tile_w}`;
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+    }
+
+    slider.addEventListener("input", () => refresh(Number(slider.value)));
+
+    document.getElementById("reset").onclick = async () => {
+      await fetch(location.origin + "/reset/" + conv.value, {method:"POST"});
+      frames = []; tokens = []; refresh(0);
+    };
+
+    document.getElementById("go").onclick = async () => {
+      frames = []; tokens = []; refresh(0);
+      const ws = new WebSocket(wsurl.value);
+      ws.onopen = () => {
+        ws.send(JSON.stringify({
+          type: "chat",
+          data: {
+            conversation_id: conv.value,
+            prompt: promptEl.value,
+            max_new_tokens: Number(maxn.value),
+            temperature: Number(temp.value),
+            top_p: Number(topp.value),
+            signal: document.getElementById("signal").value
+          }
+        }));
+      };
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "frame") {
+          const {token, frame} = msg.data;
+          tokens.push(token);
+          frames.push(frame);
+          refresh(frames.length - 1);
+        }
+        if (msg.type === "error") {
+          alert("Server error: " + msg.error);
+        }
+      };
+      ws.onerror = (e) => console.error(e);
+    };
+
+    // Initial blank
+    refresh(0);
+  </script>
+</body>
+</html>

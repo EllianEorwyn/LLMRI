@@ -86,6 +86,85 @@ If using LM Studio/Ollama, the viewer still runs, but the frames will be blank p
 python3 -m venv ~/AI/venv
 source ~/AI/venv/bin/activate
 pip install --upgrade pip
-pip install fastapi uvicorn transformers torch torchvision pydantic
+pip install fastapi uvicorn transformers torch torchvision pydantic httpx pyyaml
 # optional
 pip install accelerate einops safetensors sentencepiece
+```
+
+---
+
+## 7. Runtime configuration
+
+Configuration is split between an optional `config.yaml` (server defaults) and the viewer UI (runtime overrides).
+
+### `config.yaml`
+
+Create a file next to `server.py` to set startup defaults. All keys are optional.
+
+```yaml
+server:
+  host: 0.0.0.0
+  port: 8008
+  cors_origins: ["*"]
+
+backend:
+  kind: transformers        # transformers | lmstudio | ollama
+  device: cuda:0
+  dtype: bfloat16            # float16 | bfloat16 | float32
+
+transformers:
+  model_id: /models/Qwen3
+
+lmstudio:
+  base_url: http://localhost:1234/v1
+  model: qwen:latest
+
+ollama:
+  base_url: http://localhost:11434
+  model: llama3
+
+reduction:
+  tile_h: 32
+  tile_w: 32
+  projection: random         # random | pca
+  rolling_window: 128
+  pca_calibration_tokens: 256
+```
+
+* Tile geometry + projection method are loaded on boot. Switches at runtime keep the existing tiles until the next chat session.
+* Leave `model_id` blank to defer loading until you apply a Transformers configuration from the UI.
+
+### Viewer controls
+
+Open `viewer.html` in a browser. Non-technical users can configure everything without touching the server:
+
+* Server endpoints: editable REST + WebSocket URLs (point to any LAN host).
+* Backend selector: Transformers (local weights), LM Studio, or Ollama.
+* Transformers pane:
+  * Model folder path on the server.
+  * Device + dtype dropdowns.
+  * “Pick folder” helper that opens the browser directory picker as a reminder to copy the correct server path.
+* LM Studio pane: base URL + “Fetch models” button that calls `GET /models` (OpenAI-compatible) and fills the dropdown.
+* Ollama pane: base URL + “Fetch models” button. It tries `/v1/models` first, then `/api/tags`.
+* Apply button: POSTs to `/configure` and shows success/failure badges.
+* Status badge: always reflects the active backend and whether activations are available.
+
+---
+
+## 8. Networking & LAN access
+
+* The FastAPI server binds to `0.0.0.0` by default so any device on your LAN can connect (`http://<server-ip>:8008`).
+* CORS defaults to `*` so you can host the HTML viewer elsewhere on the LAN (tighten this in `config.yaml` for production).
+* The viewer only talks to the addresses you type—no cloud calls.
+* Use a reverse proxy + auth if you plan to expose the service beyond your local network.
+
+---
+
+## 9. Feature roadmap highlights
+
+* Runtime backend switching (`/configure`) without restarting the server.
+* Transformers mode streams activation tiles (one per layer) in sync with tokens.
+* LM Studio + Ollama modes reuse the same UI but stream chat-only timelines.
+* Session API: `/reset/{conversation_id}` clears memory, `/frames/{conversation_id}` retrieves stored frames.
+* Viewer fallback: blank canvases when activations are unavailable, timeline always updates.
+* Robust error messages for bad paths, missing models, or unreachable APIs.

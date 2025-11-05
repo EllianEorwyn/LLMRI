@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import math
@@ -144,6 +145,14 @@ class TransformerRuntime:
         self.n_layers = 0
         self.d_model = 0
 
+        gc.collect()
+        if self.device and self.device.startswith("cuda") and torch.cuda.is_available():
+            try:
+                with torch.cuda.device(self.device):
+                    torch.cuda.empty_cache()
+            except Exception as exc:  # pragma: no cover - best effort cleanup
+                LOGGER.warning("Failed to empty CUDA cache on %s: %s", self.device, exc)
+
 
 TRANSFORMERS_STATE = TransformerRuntime()
 
@@ -166,6 +175,12 @@ ACTIVE_BACKEND: Dict[str, Any] = {
 
 backend_lock = asyncio.Lock()
 SESSIONS: Dict[str, Dict[str, List[Any]]] = {}
+
+
+def clear_conversation(conversation_id: str) -> Dict[str, List[Any]]:
+    session = {"frames": [], "tokens": []}
+    SESSIONS[conversation_id] = session
+    return session
 
 
 ###############################################################################
@@ -394,8 +409,18 @@ def get_frames(conversation_id: str):
 
 @app.post("/reset/{conversation_id}")
 def reset(conversation_id: str):
-    SESSIONS[conversation_id] = {"frames": [], "tokens": []}
+    clear_conversation(conversation_id)
     return {"ok": True}
+
+
+@app.post("/unload")
+async def unload():
+    async with backend_lock:
+        unloaded = False
+        if ACTIVE_BACKEND["kind"] == "transformers" and TRANSFORMERS_STATE.model is not None:
+            TRANSFORMERS_STATE.reset()
+            unloaded = True
+        return {"ok": True, "unloaded": unloaded, "kind": ACTIVE_BACKEND["kind"]}
 
 
 @app.post("/configure")
@@ -465,7 +490,7 @@ async def run_chat_transformers(req: ChatRequest, ws: WebSocket) -> None:
     model = runtime.model
     assert tokenizer is not None and model is not None
 
-    conversation = SESSIONS.setdefault(req.conversation_id, {"frames": [], "tokens": []})
+    conversation = clear_conversation(req.conversation_id)
     inputs = tokenizer(req.prompt, return_tensors="pt")
     inputs = {k: v.to(runtime.device) for k, v in inputs.items()}
     input_ids = inputs["input_ids"]
@@ -536,7 +561,7 @@ async def run_chat_openai_compatible(req: ChatRequest, ws: WebSocket, cfg: Dict[
     if not base_url or not model_name:
         raise ValueError(f"{label} base_url and model must be configured before chatting")
 
-    conversation = SESSIONS.setdefault(req.conversation_id, {"frames": [], "tokens": []})
+    conversation = clear_conversation(req.conversation_id)
     payload = {
         "model": model_name,
         "stream": True,
@@ -576,7 +601,7 @@ async def run_chat_ollama_native(req: ChatRequest, ws: WebSocket, cfg: Dict[str,
     if not base_url or not model_name:
         raise ValueError("ollama base_url and model must be configured before chatting")
 
-    conversation = SESSIONS.setdefault(req.conversation_id, {"frames": [], "tokens": []})
+    conversation = clear_conversation(req.conversation_id)
     payload = {
         "model": model_name,
         "prompt": req.prompt,

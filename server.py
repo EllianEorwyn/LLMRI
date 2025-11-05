@@ -14,6 +14,83 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+# server.py additions and changes
+
+from fastapi import FastAPI, WebSocket
+from pydantic import BaseModel
+
+
+# Keep existing imports and model code for the Transformers backend as before
+
+# Active backend config in memory
+ACTIVE_BACKEND = {
+    "kind": "transformers",
+    "transformers": {"model_id": "", "device": "cuda:0", "dtype": "bfloat16"},
+    "lmstudio": {"base_url": "http://localhost:1234/v1", "model": ""},
+    "ollama": {"base_url": "http://localhost:11434", "model": ""},
+}
+
+class ConfigureReq(BaseModel):
+    kind: str
+    transformers: dict | None = None
+    lmstudio: dict | None = None
+    ollama: dict | None = None
+
+@app.post("/configure")
+def configure(req: ConfigureReq):
+    global ACTIVE_BACKEND, model, tokenizer, projections, N_LAYERS, D_MODEL, normer
+    ACTIVE_BACKEND["kind"] = req.kind
+    if req.transformers: ACTIVE_BACKEND["transformers"] = req.transformers
+    if req.lmstudio: ACTIVE_BACKEND["lmstudio"] = req.lmstudio
+    if req.ollama: ACTIVE_BACKEND["ollama"] = req.ollama
+
+    # If switching to Transformers, (re)load the model
+    if req.kind == "transformers":
+        mid = ACTIVE_BACKEND["transformers"]["model_id"]
+        dev = ACTIVE_BACKEND["transformers"]["device"]
+        dt = ACTIVE_BACKEND["transformers"]["dtype"]
+        torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[dt]
+        tokenizer = AutoTokenizer.from_pretrained(mid, use_fast=True)
+        model = AutoModelForCausalLM.from_pretrained(mid, torch_dtype=torch_dtype, device_map={"": dev})
+        model.config.output_hidden_states = True
+        with torch.no_grad():
+            dummy = tokenizer("hello", return_tensors="pt").to(dev)
+            out = model(**dummy, output_hidden_states=True)
+            N_LAYERS = len(out.hidden_states) - 1
+            D_MODEL = out.hidden_states[-1].shape[-1]
+        # rebuild projections and normer
+        g = torch.Generator(device=dev).manual_seed(42)
+        TILE_H, TILE_W = 32, 32
+        M_PIXELS = TILE_H * TILE_W
+        projections = [torch.randn(D_MODEL, M_PIXELS, generator=g, device=dev, dtype=model.dtype) / (D_MODEL ** 0.5) for _ in range(N_LAYERS)]
+        normer = RollingNorm(128, N_LAYERS, M_PIXELS)
+    return {"ok": True, "kind": ACTIVE_BACKEND["kind"]}
+
+# In your websocket handler, send a small status line to the client
+@app.websocket("/ws/stream")
+async def ws_stream(ws: WebSocket):
+    await ws.accept()
+    try:
+        await ws.send_text(json.dumps({"type": "server", "data": f"backend {ACTIVE_BACKEND['kind']}"}))
+        while True:
+            msg = await ws.receive_text()
+            cmd = json.loads(msg)
+            if cmd.get("type") == "chat":
+                req = ChatRequest(**cmd["data"])
+                # route by backend
+                if ACTIVE_BACKEND["kind"] == "transformers":
+                    await run_chat_transformers(req, ws)
+                elif ACTIVE_BACKEND["kind"] == "lmstudio":
+                    await run_chat_openai_compatible(req, ws, ACTIVE_BACKEND["lmstudio"]["base_url"], ACTIVE_BACKEND["lmstudio"]["model"])
+                elif ACTIVE_BACKEND["kind"] == "ollama":
+                    # try OpenAI compatible first, else fall back to native
+                    try:
+                        await run_chat_openai_compatible(req, ws, ACTIVE_BACKEND["ollama"]["base_url"] + "/v1", ACTIVE_BACKEND["ollama"]["model"])
+                    except Exception:
+                        await run_chat_ollama_native(req, ws, ACTIVE_BACKEND["ollama"]["base_url"], ACTIVE_BACKEND["ollama"]["model"])
+    except WebSocketDisconnect:
+        pass
+
 # ======== Config ========
 MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen2.5-4B-Instruct")  # adjust if needed
 DEVICE = os.environ.get("DEVICE", "cuda:0")

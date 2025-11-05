@@ -1,173 +1,366 @@
+<!-- ui/viewer.html -->
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8"/>
-  <title>LLM fMRI Viewer</title>
+  <meta charset="utf-8">
+  <title>LLM Activation Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { font-family: system-ui, sans-serif; margin: 12px; }
-    .row { display: flex; gap: 12px; align-items: center; }
-    #canvas { border: 1px solid #888; image-rendering: pixelated; }
-    #layers { width: 360px; height: 120px; }
-    textarea { width: 100%; height: 80px; }
-    .tokenstream { font-family: ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap; }
-    .btn { padding: 6px 10px; cursor: pointer; }
-    .badge { padding: 2px 6px; background: #eee; border-radius: 8px; margin-left: 8px; }
+    * { box-sizing: border-box }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, sans-serif; margin: 14px; color: #111 }
+    h2 { margin: 0 0 8px 0 }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 6px 0 }
+    .col { display: flex; flex-direction: column; gap: 6px }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px }
+    label { font-size: 12px; color: #444 }
+    input[type="text"], input[type="number"], select { padding: 6px 8px; border: 1px solid #bbb; border-radius: 8px; min-width: 220px }
+    textarea { width: 100%; height: 96px; padding: 8px; border: 1px solid #bbb; border-radius: 8px }
+    .btn { padding: 8px 12px; border: 1px solid #888; background: #fafafa; border-radius: 8px; cursor: pointer }
+    .btn.primary { background: #1a73e8; color: #fff; border-color: #1a73e8 }
+    .btn:disabled { opacity: .6; cursor: not-allowed }
+    #canvas { border: 1px solid #999; image-rendering: pixelated; background: #000; max-width: 100% }
+    .tokenstream { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; border: 1px solid #ddd; border-radius: 8px; padding: 8px; background: #fff }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #eee; color: #333 }
+    .warn { background: #fff3cd; color: #8a6d3b }
+    .ok { background: #e6f4ea; color: #1e7e34 }
+    .err { background: #fdecea; color: #a94442 }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px }
+    .spacer { flex: 1 }
   </style>
 </head>
 <body>
   <h2>LLM Activation Viewer</h2>
 
-  <div class="row">
-    <label>Server ws://</label>
-    <input id="wsurl" value="ws://localhost:8008/ws/stream" size="40"/>
-    <label>Conversation</label>
-    <input id="conv" value="demo1" size="10"/>
-    <button id="reset" class="btn">Reset</button>
-  </div>
+  <div class="grid">
+    <div class="card">
+      <div class="row">
+        <div class="col">
+          <label>Server WebSocket</label>
+          <input id="wsurl" type="text" value="ws://localhost:8008/ws/stream">
+        </div>
+        <div class="col">
+          <label>REST Base</label>
+          <input id="resturl" type="text" value="http://localhost:8008">
+        </div>
+        <div class="col">
+          <label>Conversation</label>
+          <input id="conv" type="text" value="demo1">
+        </div>
+        <div class="spacer"></div>
+        <button id="reset" class="btn">Reset session</button>
+      </div>
+      <div class="row">
+        <span class="badge" id="srvInfo">disconnected</span>
+      </div>
+    </div>
 
-  <div style="margin-top:8px">
-    <textarea id="prompt" placeholder="Type your prompt..."></textarea>
-    <div class="row">
-      <label>Max new tokens</label><input id="maxn" type="number" value="64" style="width:70px"/>
-      <label>Temp</label><input id="temp" type="number" step="0.05" value="0.7" style="width:70px"/>
-      <label>Top-p</label><input id="topp" type="number" step="0.05" value="0.95" style="width:70px"/>
-      <button id="go" class="btn">Generate and Stream</button>
+    <div class="card">
+      <strong>Backend configuration</strong>
+      <div class="row">
+        <label><input type="radio" name="backend" value="transformers" checked> Transformers, local weights</label>
+        <label><input type="radio" name="backend" value="lmstudio"> LM Studio</label>
+        <label><input type="radio" name="backend" value="ollama"> Ollama</label>
+        <span id="capBadge" class="badge warn">activations available only with Transformers</span>
+      </div>
+
+      <div id="pane_transformers">
+        <div class="row">
+          <div class="col">
+            <label>Model folder on server, contains config.json and .safetensors</label>
+            <input id="hfPath" type="text" placeholder="/models/Qwen3-4B-Instruct">
+          </div>
+          <div class="col">
+            <label>Device</label>
+            <select id="device">
+              <option>cuda:0</option>
+              <option>cuda:1</option>
+              <option>cpu</option>
+            </select>
+          </div>
+          <div class="col">
+            <label>DType</label>
+            <select id="dtype">
+              <option>bfloat16</option>
+              <option>float16</option>
+              <option>float32</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <button id="chooseFolder" class="btn">Pick folder locally, paste path</button>
+          <small id="folderHint">use this to copy the path, then paste into the input</small>
+        </div>
+      </div>
+
+      <div id="pane_lmstudio" style="display:none">
+        <div class="row">
+          <div class="col">
+            <label>LM Studio base URL</label>
+            <input id="lmBase" type="text" value="http://localhost:1234/v1">
+          </div>
+          <div class="col">
+            <label>Model</label>
+            <select id="lmModel"><option value="">fetch models first</option></select>
+          </div>
+          <button id="lmFetch" class="btn">Fetch models</button>
+        </div>
+      </div>
+
+      <div id="pane_ollama" style="display:none">
+        <div class="row">
+          <div class="col">
+            <label>Ollama base URL</label>
+            <input id="olBase" type="text" value="http://localhost:11434">
+          </div>
+          <div class="col">
+            <label>Model</label>
+            <select id="olModel"><option value="">fetch models first</option></select>
+          </div>
+          <button id="olFetch" class="btn">Fetch models</button>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:8px">
+        <button id="applyCfg" class="btn primary">Apply configuration</button>
+        <span id="cfgStatus" class="badge">not applied</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <strong>Prompt and generation</strong>
+      <textarea id="prompt" placeholder="Type a prompt"></textarea>
+      <div class="row">
+        <div class="col">
+          <label>Max new tokens</label>
+          <input id="maxn" type="number" value="64" min="1">
+        </div>
+        <div class="col">
+          <label>Temperature</label>
+          <input id="temp" type="number" step="0.05" value="0.7">
+        </div>
+        <div class="col">
+          <label>Top-p</label>
+          <input id="topp" type="number" step="0.05" value="0.95">
+        </div>
+        <div class="col">
+          <label>Signal to luminance</label>
+          <select id="signal">
+            <option value="residual">Residual, MVP</option>
+          </select>
+        </div>
+        <div class="col">
+          <label>Color mode</label>
+          <select id="colormode">
+            <option value="gray">Gray</option>
+            <option value="energy">Energy</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <button id="go" class="btn primary">Generate and stream</button>
+        <span class="badge ok" id="info">ready</span>
+      </div>
     </div>
   </div>
 
-  <div style="margin-top:12px" class="row">
-    <label>Signal→Luminance</label>
-    <select id="signal">
-      <option value="residual">Residual (MVP)</option>
-    </select>
-    <label>Color mode</label>
-    <select id="colormode">
-      <option value="gray">Gray</option>
-      <option value="energy">Blue→Red by magnitude</option>
-    </select>
-    <label>Layout</label>
-    <select id="layout">
-      <option value="grid">Grid layers</option>
-    </select>
-    <span class="badge" id="info"></span>
-  </div>
-
   <div class="row" style="margin-top:8px">
-    <input type="range" id="slider" min="0" max="0" value="0" style="width: 480px;"/>
-    <span id="toklbl"></span>
+    <input type="range" id="slider" min="0" max="0" value="0" style="flex:1">
+    <span id="toklbl" class="badge">frame 0/0</span>
   </div>
 
   <div class="row" style="margin-top:8px">
     <canvas id="canvas" width="1024" height="1024"></canvas>
     <div style="flex:1">
-      <div>Tokens</div>
+      <div class="row"><strong>Tokens</strong></div>
       <div id="tokens" class="tokenstream"></div>
     </div>
   </div>
 
   <script>
-    const canvas = document.getElementById("canvas");
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    // UI state
     const wsurl = document.getElementById("wsurl");
+    const resturl = document.getElementById("resturl");
     const conv = document.getElementById("conv");
+    const srvInfo = document.getElementById("srvInfo");
+    const capBadge = document.getElementById("capBadge");
+    const cfgStatus = document.getElementById("cfgStatus");
+
+    // Backend panes
+    const paneT = document.getElementById("pane_transformers");
+    const paneL = document.getElementById("pane_lmstudio");
+    const paneO = document.getElementById("pane_ollama");
+    const backendRadios = [...document.querySelectorAll('input[name="backend"]')];
+
+    // Transformers fields
+    const hfPath = document.getElementById("hfPath");
+    const device = document.getElementById("device");
+    const dtype = document.getElementById("dtype");
+    const chooseFolder = document.getElementById("chooseFolder");
+
+    // LM Studio fields
+    const lmBase = document.getElementById("lmBase");
+    const lmModel = document.getElementById("lmModel");
+    const lmFetch = document.getElementById("lmFetch");
+
+    // Ollama fields
+    const olBase = document.getElementById("olBase");
+    const olModel = document.getElementById("olModel");
+    const olFetch = document.getElementById("olFetch");
+
+    // Generation fields
     const promptEl = document.getElementById("prompt");
-    const signalEl = document.getElementById("signal");
-    const colormode = document.getElementById("colormode");
-    const slider = document.getElementById("slider");
-    const tokensDiv = document.getElementById("tokens");
-    const toklbl = document.getElementById("toklbl");
-    const info = document.getElementById("info");
     const maxn = document.getElementById("maxn");
     const temp = document.getElementById("temp");
     const topp = document.getElementById("topp");
+    const signalEl = document.getElementById("signal");
+    const goBtn = document.getElementById("go");
+    const resetBtn = document.getElementById("reset");
+    const info = document.getElementById("info");
 
-    let frames = [];  // {tiles: [L][H][W]}
+    // Canvas
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const slider = document.getElementById("slider");
+    const tokensDiv = document.getElementById("tokens");
+    const toklbl = document.getElementById("toklbl");
+    const colormode = document.getElementById("colormode");
+
+    // Buffers
+    let frames = [];
     let tokens = [];
 
-    function layoutGrid(tiles) {
-      const L = tiles.length;
-      const th = tiles[0].length, tw = tiles[0][0].length;
-      // Make a near-square grid
-      const cols = Math.ceil(Math.sqrt(L));
-      const rows = Math.ceil(L / cols);
-      const cell = Math.floor(Math.min(canvas.width / cols, canvas.height / rows));
-      const scaleX = cell / tw, scaleY = cell / th;
+    function showBackendPane() {
+      const b = getBackend();
+      paneT.style.display = b === "transformers" ? "" : "none";
+      paneL.style.display = b === "lmstudio" ? "" : "none";
+      paneO.style.display = b === "ollama" ? "" : "none";
+      capBadge.className = "badge " + (b === "transformers" ? "ok" : "warn");
+      capBadge.textContent = b === "transformers"
+        ? "activations available"
+        : "activations unavailable on this backend";
+    }
+    backendRadios.forEach(r => r.addEventListener("change", showBackendPane));
+    showBackendPane();
 
-      // clear
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-      for (let i = 0; i < L; i++) {
-        const r = Math.floor(i / cols), c = i % cols;
-        const x0 = Math.floor(c * cell), y0 = Math.floor(r * cell);
-        drawTile(tiles[i], x0, y0, scaleX, scaleY);
-      }
+    function getBackend() {
+      const r = backendRadios.find(x => x.checked);
+      return r ? r.value : "transformers";
     }
 
-    function drawTile(tile, x0, y0, sx, sy) {
-      const h = tile.length, w = tile[0].length;
-      const img = ctx.createImageData(w, h);
-      const mode = colormode.value;
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          const v = tile[y][x]; // 0..255
-          let r, g, b;
-          if (mode === "gray") {
-            r = g = b = v;
-          } else {
-            // energy: blue (low) -> red (high)
-            const t = v / 255.0;
-            r = Math.floor(255 * t);
-            g = Math.floor(255 * (1.0 - Math.abs(t - 0.5) * 2.0));
-            b = Math.floor(255 * (1.0 - t));
-          }
-          const idx = (y * w + x) * 4;
-          img.data[idx + 0] = r;
-          img.data[idx + 1] = g;
-          img.data[idx + 2] = b;
-          img.data[idx + 3] = 255;
+    // Folder helper, File System Access API for path copy only
+    chooseFolder.onclick = async () => {
+      try {
+        if (!window.showDirectoryPicker) {
+          alert("Your browser does not support directory picking, please type the server path manually");
+          return;
         }
+        const dir = await window.showDirectoryPicker();
+        // No direct server path here, user copies the path they know on the server
+        alert("Picked a local folder in this browser, copy your server path into the Model folder input");
+      } catch (e) {}
+    };
+
+    // Fetch LM Studio models, OpenAI compatible /v1/models
+    lmFetch.onclick = async () => {
+      try {
+        lmModel.innerHTML = "";
+        const res = await fetch(lmBase.value.replace(/\/+$/,'') + "/models");
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const js = await res.json();
+        const list = js.data || [];
+        if (!list.length) throw new Error("no models returned");
+        for (const m of list) {
+          const id = m.id || m.name || "";
+          if (!id) continue;
+          const opt = document.createElement("option");
+          opt.value = id; opt.textContent = id;
+          lmModel.appendChild(opt);
+        }
+      } catch (e) {
+        alert("Failed to fetch LM Studio models, " + e.message);
       }
-      // Put and scale
-      const tmp = document.createElement("canvas");
-      tmp.width = w; tmp.height = h;
-      tmp.getContext("2d").putImageData(img, 0, 0);
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(tmp, x0, y0, w * sx, h * sy);
-    }
+    };
 
-    function refresh(idx) {
-      if (frames.length === 0) {
-        ctx.fillStyle = "#111"; ctx.fillRect(0, 0, canvas.width, canvas.height); return;
+    // Fetch Ollama models, try /v1/models then fallback to /api/tags
+    olFetch.onclick = async () => {
+      try {
+        olModel.innerHTML = "";
+        const base = olBase.value.replace(/\/+$/,'');
+        let list = [];
+        try {
+          const r1 = await fetch(base + "/v1/models");
+          if (r1.ok) {
+            const js = await r1.json();
+            list = js.data?.map(x => x.id).filter(Boolean) || [];
+          }
+        } catch (_) {}
+        if (!list.length) {
+          const r2 = await fetch(base + "/api/tags");
+          if (!r2.ok) throw new Error("HTTP " + r2.status);
+          const js2 = await r2.json();
+          list = js2.models?.map(x => x.name).filter(Boolean) || [];
+        }
+        if (!list.length) throw new Error("no models returned");
+        for (const id of list) {
+          const opt = document.createElement("option");
+          opt.value = id; opt.textContent = id;
+          olModel.appendChild(opt);
+        }
+      } catch (e) {
+        alert("Failed to fetch Ollama models, " + e.message);
       }
-      const i = Math.max(0, Math.min(idx, frames.length - 1));
-      const fr = frames[i];
-      layoutGrid(fr.tiles);
-      slider.max = String(frames.length - 1);
-      slider.value = String(i);
-      toklbl.textContent = `frame ${i+1}/${frames.length}`;
-      // tokens view with highlight
-      tokensDiv.innerHTML = tokens.map((t, k) =>
-        k === i ? `<span style="background:#ffd54f">${escapeHtml(t)}</span>` : escapeHtml(t)
-      ).join("");
-      info.textContent = `layers ${frames[0].tiles.length} · tile ${frames[0].tile_h}×${frames[0].tile_w}`;
-    }
+    };
 
-    function escapeHtml(s) {
-      return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-    }
+    // Apply configuration to server
+    document.getElementById("applyCfg").onclick = async () => {
+      const b = getBackend();
+      const payload = { kind: b };
+      if (b === "transformers") {
+        payload.transformers = {
+          model_id: hfPath.value.trim(),
+          device: device.value,
+          dtype: dtype.value
+        };
+      } else if (b === "lmstudio") {
+        payload.lmstudio = {
+          base_url: lmBase.value.trim().replace(/\/+$/,''),
+          model: lmModel.value.trim()
+        };
+      } else if (b === "ollama") {
+        payload.ollama = {
+          base_url: olBase.value.trim().replace(/\/+$/,''),
+          model: olModel.value.trim()
+        };
+      }
+      try {
+        const r = await fetch(resturl.value.replace(/\/+$/,'') + "/configure", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const js = await r.json();
+        cfgStatus.className = "badge ok";
+        cfgStatus.textContent = "applied, " + js.kind;
+      } catch (e) {
+        cfgStatus.className = "badge err";
+        cfgStatus.textContent = "failed, " + e.message;
+      }
+    };
 
-    slider.addEventListener("input", () => refresh(Number(slider.value)));
-
-    document.getElementById("reset").onclick = async () => {
-      await fetch(location.origin + "/reset/" + conv.value, {method:"POST"});
+    // Session reset
+    resetBtn.onclick = async () => {
+      await fetch(resturl.value.replace(/\/+$/,'') + "/reset/" + encodeURIComponent(conv.value), { method: "POST" });
       frames = []; tokens = []; refresh(0);
     };
 
+    // Stream generation
     document.getElementById("go").onclick = async () => {
       frames = []; tokens = []; refresh(0);
+      info.textContent = "connecting";
       const ws = new WebSocket(wsurl.value);
       ws.onopen = () => {
+        info.textContent = "streaming";
         ws.send(JSON.stringify({
           type: "chat",
           data: {
@@ -176,26 +369,97 @@
             max_new_tokens: Number(maxn.value),
             temperature: Number(temp.value),
             top_p: Number(topp.value),
-            signal: document.getElementById("signal").value
+            signal: signalEl.value
           }
         }));
       };
-      ws.onmessage = (ev) => {
+      ws.onmessage = ev => {
         const msg = JSON.parse(ev.data);
         if (msg.type === "frame") {
-          const {token, frame} = msg.data;
+          const { token, frame } = msg.data;
           tokens.push(token);
           frames.push(frame);
           refresh(frames.length - 1);
         }
+        if (msg.type === "server") {
+          srvInfo.textContent = msg.data || "";
+        }
         if (msg.type === "error") {
-          alert("Server error: " + msg.error);
+          info.textContent = "error";
+          alert("Server error, " + msg.error);
         }
       };
-      ws.onerror = (e) => console.error(e);
+      ws.onclose = () => { info.textContent = "closed" };
+      ws.onerror = () => { info.textContent = "error" };
     };
 
-    // Initial blank
+    // Rendering
+    function refresh(idx) {
+      if (!frames.length) {
+        ctx.fillStyle = "#000"; ctx.fillRect(0,0,canvas.width,canvas.height);
+        slider.max = "0"; slider.value = "0"; toklbl.textContent = "frame 0/0";
+        tokensDiv.textContent = "";
+        return;
+      }
+      const i = Math.max(0, Math.min(idx, frames.length - 1));
+      const fr = frames[i];
+      slider.max = String(frames.length - 1);
+      slider.value = String(i);
+      toklbl.textContent = "frame " + (i+1) + "/" + frames.length;
+
+      const tiles = fr.tiles || [];
+      if (!tiles.length) {
+        // chat only
+        ctx.fillStyle = "#111"; ctx.fillRect(0,0,canvas.width,canvas.height);
+      } else {
+        drawTiles(tiles, fr.tile_h, fr.tile_w);
+      }
+      tokensDiv.innerHTML = tokens.map((t,k) =>
+        k === i ? '<span style="background:#ffd54f">' + esc(t) + '</span>' : esc(t)
+      ).join("");
+    }
+
+    function drawTiles(tiles, th, tw) {
+      const L = tiles.length;
+      const cols = Math.ceil(Math.sqrt(L));
+      const rows = Math.ceil(L / cols);
+      const cell = Math.floor(Math.min(canvas.width / cols, canvas.height / rows));
+      const sx = cell / tw, sy = cell / th;
+      ctx.fillStyle = "#000"; ctx.fillRect(0,0,canvas.width,canvas.height);
+      for (let i = 0; i < L; i++) {
+        const r = Math.floor(i / cols), c = i % cols;
+        const x0 = Math.floor(c * cell), y0 = Math.floor(r * cell);
+        drawTile(tiles[i], x0, y0, sx, sy);
+      }
+    }
+
+    function drawTile(tile, x0, y0, sx, sy) {
+      const h = tile.length, w = tile[0].length;
+      const img = ctx.createImageData(w, h);
+      const mode = colormode.value;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const v = tile[y][x] | 0;
+        let r, g, b;
+        if (mode === "gray") { r = g = b = v }
+        else {
+          const t = v / 255;
+          r = Math.floor(255 * t);
+          g = Math.floor(255 * (1 - Math.abs(t - .5) * 2));
+          b = Math.floor(255 * (1 - t));
+        }
+        const k = (y * w + x) * 4;
+        img.data[k+0]=r; img.data[k+1]=g; img.data[k+2]=b; img.data[k+3]=255;
+      }
+      const tmp = document.createElement("canvas");
+      tmp.width = w; tmp.height = h;
+      tmp.getContext("2d").putImageData(img, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(tmp, x0, y0, w * sx, h * sy);
+    }
+
+    slider.addEventListener("input", () => refresh(Number(slider.value)));
+
+    function esc(s) { return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])) }
     refresh(0);
   </script>
 </body>

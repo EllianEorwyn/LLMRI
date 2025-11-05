@@ -47,7 +47,7 @@
           <input id="conv" type="text" value="demo1">
         </div>
         <div class="spacer"></div>
-        <button id="reset" class="btn">Reset session</button>
+        <button id="clearCtx" class="btn">Clear context</button>
       </div>
       <div class="row">
         <span class="badge" id="srvInfo">disconnected</span>
@@ -122,6 +122,7 @@
 
       <div class="row" style="margin-top:8px">
         <button id="applyCfg" class="btn primary">Apply configuration</button>
+        <button id="unloadModel" class="btn">Unload model</button>
         <span id="cfgStatus" class="badge">not applied</span>
       </div>
     </div>
@@ -215,7 +216,8 @@
     const topp = document.getElementById("topp");
     const signalEl = document.getElementById("signal");
     const goBtn = document.getElementById("go");
-    const resetBtn = document.getElementById("reset");
+    const clearBtn = document.getElementById("clearCtx");
+    const unloadBtn = document.getElementById("unloadModel");
     const info = document.getElementById("info");
 
     // Canvas
@@ -353,15 +355,47 @@
       }
     };
 
-    // Session reset
-    resetBtn.onclick = async () => {
-      await fetch(resturl.value.replace(/\/+$/,'') + "/reset/" + encodeURIComponent(conv.value), { method: "POST" });
-      frames = []; tokens = []; refresh(0);
+    async function clearSession() {
+      const base = resturl.value.replace(/\/+$/,'');
+      try {
+        await fetch(base + "/reset/" + encodeURIComponent(conv.value), { method: "POST" });
+      } catch (e) {
+        console.warn("Failed to clear session", e);
+      }
+      frames = [];
+      tokens = [];
+      refresh(0);
+    }
+
+    clearBtn.onclick = async () => {
+      await clearSession();
+      info.textContent = "context cleared";
+    };
+
+    unloadBtn.onclick = async () => {
+      const base = resturl.value.replace(/\/+$/,'');
+      const prevLabel = unloadBtn.textContent;
+      unloadBtn.disabled = true;
+      unloadBtn.textContent = "Unloading...";
+      try {
+        const res = await fetch(base + "/unload", { method: "POST" });
+        const js = await res.json().catch(() => ({}));
+        if (!res.ok || js.ok === false) {
+          throw new Error(js.error || ("HTTP " + res.status));
+        }
+        info.textContent = js.unloaded ? "model unloaded" : "no model to unload";
+      } catch (e) {
+        alert("Failed to unload model, " + e.message);
+      } finally {
+        unloadBtn.textContent = prevLabel;
+        unloadBtn.disabled = false;
+        refreshServerStatus();
+      }
     };
 
     // Stream generation
-    document.getElementById("go").onclick = async () => {
-      frames = []; tokens = []; refresh(0);
+    goBtn.onclick = async () => {
+      await clearSession();
       info.textContent = "connecting";
       const ws = new WebSocket(wsurl.value);
       ws.onopen = () => {
